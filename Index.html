@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mobile PDF Handler</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 Mobile PDF Handler</h1>
+            <p>Load PDFs from URLs or upload files - optimized for mobile</p>
+        </div>
+        <div class="url-input-section">
+            <div class="url-input-container">
+                <input type="text" id="urlInput" class="url-input" placeholder="Enter PDF URL">
+                <button class="load-btn" id="loadUrlBtn">Load PDF</button>
+            </div>
+            <div class="url-examples">
+                <h4>📋 URL Examples:</h4>
+                <p>• <code>https://yoursite.com/src/document.pdf</code></p>
+                <p>• <code>./src/manual.pdf</code> (relative path)</p>
+                <p>• <code>/assets/report.pdf</code> (absolute path)</p>
+            </div>
+        </div>
+        <div class="upload-section">
+            <div class="file-input-container">
+                <input type="file" id="fileInput" class="file-input" accept=".pdf" multiple>
+                <label for="fileInput" class="file-input-label">📄 Or Upload PDF Files</label>
+            </div>
+        </div>
+        <div class="pdf-list" id="pdfList">
+            <div class="empty-state">
+                <h3>No PDFs loaded yet</h3>
+                <p>Load a PDF from URL or upload files to get started</p>
+            </div>
+        </div>
+        <div class="viewer-container" id="viewerContainer">
+            <div class="viewer-controls">
+                <button class="control-btn" id="prevBtn">← Previous</button>
+                <div class="page-info" id="pageInfo">Page 1 of 1</div>
+                <button class="control-btn" id="nextBtn">Next →</button>
+                <button class="control-btn" id="fullscreenBtn">🔍 Fullscreen</button>
+            </div>
+            <div class="canvas-container">
+                <canvas id="pdfCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="fullscreen-viewer" id="fullscreenViewer">
+        <button class="close-fullscreen" id="closeFullscreen">✕ Close</button>
+        <div class="fullscreen-controls">
+            <button class="control-btn" id="fullscreenPrevBtn">← Previous</button>
+            <div class="page-info" id="fullscreenPageInfo">Page 1 of 1</div>
+            <button class="control-btn" id="fullscreenNextBtn">Next →</button>
+        </div>
+        <div class="canvas-container">
+            <canvas id="fullscreenCanvas"></canvas>
+        </div>
+    </div>
+    <script>
+        class MobilePDFHandler {
+            constructor() {
+                this.currentPDF = null;
+                this.currentPage = 1;
+                this.totalPages = 0;
+                this.canvas = document.getElementById('pdfCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.fullscreenCanvas = document.getElementById('fullscreenCanvas');
+                this.fullscreenCtx = this.fullscreenCanvas.getContext('2d');
+                this.loadedPDFs = new Map();
+                this.isFullscreen = false;
+
+                this.initializeEventListeners();
+                this.handleURLRouting();
+            }
+
+            initializeEventListeners() {
+                document.getElementById('fileInput').addEventListener('change', (e) => this.handleFileUpload(e.target.files));
+                document.getElementById('loadUrlBtn').addEventListener('click', () => this.loadFromURL());
+                document.getElementById('urlInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') this.loadFromURL(); });
+                document.getElementById('prevBtn').addEventListener('click', () => this.previousPage());
+                document.getElementById('nextBtn').addEventListener('click', () => this.nextPage());
+                document.getElementById('fullscreenBtn').addEventListener('click', () => this.toggleFullscreen());
+                document.getElementById('closeFullscreen').addEventListener('click', () => this.exitFullscreen());
+                document.getElementById('fullscreenPrevBtn').addEventListener('click', () => this.previousPage());
+                document.getElementById('fullscreenNextBtn').addEventListener('click', () => this.nextPage());
+                window.addEventListener('resize', () => { if (this.currentPDF) this.renderPage(this.currentPage); });
+                document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.isFullscreen) this.exitFullscreen(); });
+            }
+
+            handleURLRouting() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const pdfUrl = urlParams.get('pdf');
+                if (pdfUrl) {
+                    document.getElementById('urlInput').value = pdfUrl;
+                    this.loadFromURL();
+                }
+                const path = window.location.pathname;
+                if (path.includes('/src/') && path.endsWith('.pdf')) {
+                    const fullUrl = window.location.origin + path;
+                    document.getElementById('urlInput').value = fullUrl;
+                    this.loadFromURL();
+                }
+            }
+
+            async loadFromURL() {
+                const urlInput = document.getElementById('urlInput');
+                const url = urlInput.value.trim();
+                if (!url) {
+                    this.showError('Please enter a PDF URL');
+                    return;
+                }
+                try {
+                    this.showLoading();
+                    let fullUrl = url;
+                    if (url.startsWith('./') || url.startsWith('/')) {
+                        fullUrl = new URL(url, window.location.origin).href;
+                    } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                        fullUrl = window.location.origin + '/' + url;
+                    }
+                    const response = await fetch(fullUrl);
+                    if (!response.ok) throw new Error(`Failed to load PDF: ${response.status} ${response.statusText}`);
+                    const arrayBuffer = await response.arrayBuffer();
+                    const filename = this.extractFilenameFromURL(fullUrl);
+                    await this.loadPDFFromArrayBuffer(arrayBuffer, filename, fullUrl);
+                    this.showSuccess(`Successfully loaded: ${filename}`);
+                    const newUrl = new URL(window.location);
+                    newUrl.searchParams.set('pdf', fullUrl);
+                    window.history.replaceState({}, '', newUrl);
+                } catch (error) {
+                    this.showError(`Failed to load PDF: ${error.message}`);
+                } finally {
+                    this.hideLoading();
+                }
+            }
+
+            extractFilenameFromURL(url) {
+                try {
+                    const urlObj = new URL(url);
+                    const pathname = urlObj.pathname;
+                    return pathname.split('/').pop() || 'document.pdf';
+                } catch {
+                    return 'document.pdf';
+                }
+            }
+
+            async handleFileUpload(files) {
+                const fileArray = Array.from(files);
+                for (const file of fileArray) {
+                    if (file.type === 'application/pdf') {
+                        try {
+                            const arrayBuffer = await file.arrayBuffer();
+                            await this.loadPDFFromArrayBuffer(arrayBuffer, file.name);
+                            this.showSuccess(`Successfully uploaded: ${file.name}`);
+                        } catch (error) {
+                            this.showError(`Failed to load ${file.name}: ${error.message}`);
+                        }
+                    }
+                }
+            }
+
+            async loadPDFFromArrayBuffer(arrayBuffer, filename, url = null) {
+                try {
+                    const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+                    this.loadedPDFs.set(filename, { pdf, url });
+                    this.addPDFToList(filename, pdf.numPages);
+                    if (this.loadedPDFs.size === 1) await this.viewPDF(filename);
+                } catch (error) {
+                    this.showError(`Failed to load ${filename}: ${error.message}`);
+                }
+            }
+
+            addPDFToList(filename, pageCount) {
+                const pdfList = document.getElementById('pdfList');
+                pdfList.style.display = 'block';
+                const emptyState = pdfList.querySelector('.empty-state');
+                if (emptyState) emptyState.remove();
+                const pdfItem = document.createElement('div');
+                pdfItem.className = 'pdf-item';
+                pdfItem.innerHTML = `<div class="pdf-name">${filename} (${pageCount} pages)</div><button class="view-btn" onclick="pdfHandler.viewPDF('${filename}')">View</button>`;
+                pdfList.appendChild(pdfItem);
+            }
+
+            async viewPDF(filename) {
+                const pdfData = this.loadedPDFs.get(filename);
+                if (!pdfData) return;
+                const pdf = pdfData.pdf;
+                this.currentPDF = pdf;
+                this.totalPages = pdf.numPages;
+                this.currentPage = 1;
+                document.getElementById('viewerContainer').style.display = 'block';
+                document.getElementById('viewerContainer').scrollIntoView({ behavior: 'smooth' });
+                await this.renderPage(1);
+            }
+
+            async renderPage(pageNumber) {
+                if (!this.currentPDF || pageNumber < 1 || pageNumber > this.totalPages) return;
+                try {
+                    const page = await this.currentPDF.getPage(pageNumber);
+                    const viewport = page.getViewport({ scale: 1 });
+                    const canvas = this.isFullscreen ? this.fullscreenCanvas : this.canvas;
+                    const ctx = this.isFullscreen ? this.fullscreenCtx : this.ctx;
+                    let containerWidth = this.isFullscreen ? window.innerWidth * 0.9 : document.querySelector('.canvas-container').clientWidth - 40;
+                    const scale = Math.min(containerWidth / viewport.width, 3);
+                    const scaledViewport = page.getViewport({ scale });
+                    canvas.width = scaledViewport.width;
+                    canvas.height = scaledViewport.height;
+                    canvas.style.maxWidth = '100%';
+                    canvas.style.maxHeight = this.isFullscreen ? '90vh' : 'auto';
+                    const renderContext = { canvasContext: ctx, viewport: scaledViewport };
+                    await page.render(renderContext).promise;
+                    this.currentPage = pageNumber;
+                    this.updatePageInfo();
+                } catch (error) {
+                    this.showError(`Failed to render page: ${error.message}`);
+                }
+            }
+
+            updatePageInfo() {
+                const pageText = `Page ${this.currentPage} of ${this.totalPages}`;
+                document.getElementById('pageInfo').textContent = pageText;
+                document.getElementById('fullscreenPageInfo').textContent = pageText;
+                const prevDisabled = this.currentPage <= 1;
+                const nextDisabled = this.currentPage >= this.totalPages;
+                document.getElementById('prevBtn').disabled = prevDisabled;
+                document.getElementById('nextBtn').disabled = nextDisabled;
+                document.getElementById('fullscreenPrevBtn').disabled = prevDisabled;
+                document.getElementById('fullscreenNextBtn').disabled = nextDisabled;
+            }
+
+            previousPage() { if (this.currentPage > 1) this.renderPage(this.currentPage - 1); }
+            nextPage() { if (this.currentPage < this.totalPages) this.renderPage(this.currentPage + 1); }
+
+            toggleFullscreen() { this.isFullscreen ? this.exitFullscreen() : this.enterFullscreen(); }
+
+            enterFullscreen() {
+                this.isFullscreen = true;
+                document.getElementById('fullscreenViewer').classList.add('active');
+                document.body.style.overflow = 'hidden';
+                this.renderPage(this.currentPage);
+            }
+
+            exitFullscreen() {
+                this.isFullscreen = false;
+                document.getElementById('fullscreenViewer').classList.remove('active');
+                document.body.style.overflow = 'auto';
+                this.renderPage(this.currentPage);
+            }
+
+            showLoading() {
+                const container = document.querySelector('.canvas-container');
+                if (!container.querySelector('.loading')) {
+                    const loading = document.createElement('div');
+                    loading.className = 'loading';
+                    loading.textContent = 'Loading PDF...';
+                    container.appendChild(loading);
+                }
+            }
+
+            hideLoading() { const loading = document.querySelector('.loading'); if (loading) loading.remove(); }
+
+            showError(message) {
+                this.hideLoading();
+                const container = document.querySelector('.url-input-section');
+                const error = document.createElement('div');
+                error.className = 'error';
+                error.textContent = message;
+                container.appendChild(error);
+                setTimeout(() => error.remove(), 5000);
+            }
+
+            showSuccess(message) {
+                this.hideLoading();
+                const container = document.querySelector('.url-input-section');
+                const success = document.createElement('div');
+                success.className = 'success';
+                success.textContent = message;
+                container.appendChild(success);
+                setTimeout(() => success.remove(), 3000);
+            }
+        }
+
+        let pdfHandler;
+        document.addEventListener('DOMContentLoaded', () => { pdfHandler = new MobilePDFHandler(); });
+    </script>
+</body>
+</html>
